@@ -191,10 +191,10 @@ A mock unit test suite is provided to verify all script logic without contacting
 Ensure you have activated the virtual environment and execute the unit test scripts:
 ```bash
 # Run Expiration Checker tests
-python3 -m unittest test_cert_checker.py
+python3 -m unittest tests/test_cert_checker.py
 
 # Run Trust Chain & Orphan Analyzer tests
-python3 -m unittest test_orphan_analyzer.py
+python3 -m unittest tests/test_orphan_analyzer.py
 ```
 
 ### Test Coverage Scenarios
