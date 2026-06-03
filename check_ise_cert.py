@@ -26,6 +26,8 @@ import os
 import argparse
 from datetime import datetime
 import requests
+import warnings
+import traceback
 
 # Disable SSL warnings for self-signed certificates by default.
 # Users can verify certificates using the --ssl-verify option.
@@ -54,7 +56,8 @@ Arguments:
                     Examples: "Admin", "EAP Authentication", "RADIUS DTLS", "Portal", or "all"
   -w, --warning     Number of days remaining before warning status (Default: 30)
   -c, --critical    Number of days remaining before critical status (Default: 15)
-  -v, --ssl-verify  Enable SSL certificate verification (Disabled by default)
+  --ssl-verify      Enable SSL certificate verification (Disabled by default)
+  -v, --verbose     Print detailed diagnostic output to stdout (Disabled by default)
 
 Monitoring Output:
   Outputs a single line compliant with Nagios/OP5 plugin guidelines, including performance data:
@@ -136,22 +139,43 @@ def check_certs(host, user, password, usage_input, warn, crit, ssl_verify=False,
         elif status == 403:
             print(f"CRITICAL: Primary PAN {host} returned 403 Forbidden. Ensure ERS API is enabled and user has access.")
         else:
-            print(f"CRITICAL: Primary PAN {host} returned HTTP {status}: {e}")
+            if verbose:
+                print(f"CRITICAL: Primary PAN {host} returned HTTP {status}: {e}")
+            else:
+                print(f"CRITICAL: Primary PAN {host} returned HTTP {status}.")
+        if verbose and verbose_log:
+            print("\n--- Detailed Certificate Diagnostics ---")
+            print("\n".join(verbose_log))
         sys.exit(2)
     except requests.exceptions.ConnectionError:
         print(f"CRITICAL: Primary PAN {host} is unreachable. Check network path or DNS resolution.")
+        if verbose and verbose_log:
+            print("\n--- Detailed Certificate Diagnostics ---")
+            print("\n".join(verbose_log))
         sys.exit(2)
     except requests.exceptions.Timeout:
         print(f"CRITICAL: Primary PAN {host} request timed out (8s limit).")
+        if verbose and verbose_log:
+            print("\n--- Detailed Certificate Diagnostics ---")
+            print("\n".join(verbose_log))
         sys.exit(2)
     except Exception as e:
-        print(f"CRITICAL: Primary PAN {host} connection failed: {e}")
+        if verbose:
+            print(f"CRITICAL: Primary PAN {host} connection failed: {e}")
+        else:
+            print(f"CRITICAL: Primary PAN {host} connection failed.")
+        if verbose and verbose_log:
+            print("\n--- Detailed Certificate Diagnostics ---")
+            print("\n".join(verbose_log))
         sys.exit(2)
 
     # Parse nodes list
     node_list = [node['hostname'] for node in nodes_data.get('response', [])]
     if not node_list:
         print(f"CRITICAL: No deployment nodes returned by Primary PAN {host}.")
+        if verbose and verbose_log:
+            print("\n--- Detailed Certificate Diagnostics ---")
+            print("\n".join(verbose_log))
         sys.exit(2)
 
     log_verbose(f"[+] Discovered {len(node_list)} node(s): {', '.join(node_list)}")
@@ -368,16 +392,27 @@ def main():
         # Let's preserve standard argparse exit, but intercept usages if needed.
         raise
 
-    check_certs(
-        host=args.host,
-        user=args.user,
-        password=args.password,
-        usage_input=args.usage,
-        warn=args.warning,
-        crit=args.critical,
-        ssl_verify=args.ssl_verify,
-        verbose=args.verbose
-    )
+    if not args.verbose:
+        warnings.filterwarnings("ignore")
+
+    try:
+        check_certs(
+            host=args.host,
+            user=args.user,
+            password=args.password,
+            usage_input=args.usage,
+            warn=args.warning,
+            crit=args.critical,
+            ssl_verify=args.ssl_verify,
+            verbose=args.verbose
+        )
+    except Exception as e:
+        if args.verbose:
+            print("CRITICAL: An unexpected internal error occurred:", file=sys.stderr)
+            traceback.print_exc()
+        else:
+            print("UNKNOWN: An unexpected error occurred. Use -v/--verbose for diagnostics.")
+        sys.exit(3)
 
 
 if __name__ == "__main__":

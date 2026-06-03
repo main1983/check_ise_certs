@@ -100,7 +100,8 @@ python3 check_ise_cert.py
 | `-m` | `--usage` | **Yes** (or `ISE_USAGE` in `.env`) | *None* | Comma-separated certificate usages to check (e.g. `Admin, RADIUS DTLS`, `EAP Authentication`, or `all`). |
 | `-w` | `--warning` | No | `30` (or `ISE_WARNING` in `.env`) | Number of days left before triggering a `WARNING` state. |
 | `-c` | `--critical` | No | `15` (or `ISE_CRITICAL` in `.env`) | Number of days left before triggering a `CRITICAL` state. |
-| `-v` | `--ssl-verify`| No | `False` (or `ISE_SSL_VERIFY` in `.env`) | Enable SSL verification of the Cisco ISE endpoints. |
+| *None*| `--ssl-verify`| No | `False` (or `ISE_SSL_VERIFY` in `.env`) | Enable SSL verification of the Cisco ISE endpoints. |
+| `-v` | `--verbose`   | No | `False` (or `ISE_VERBOSE` in `.env`)    | Print detailed diagnostic output to stdout (debugging mode). |
 
 ---
 
@@ -187,20 +188,54 @@ Monitoring systems use exit codes to gauge status severity:
 A mock unit test suite is provided to verify all script logic without contacting a live Cisco ISE server.
 
 ### Run Unit Tests
-Ensure you have activated the virtual environment and executed the unit test script:
+Ensure you have activated the virtual environment and execute the unit test scripts:
 ```bash
+# Run Expiration Checker tests
 python3 -m unittest test_cert_checker.py
-```
-*(or run the test script directly)*:
-```bash
-python3 test_cert_checker.py
+
+# Run Trust Chain & Orphan Analyzer tests
+python3 -m unittest test_orphan_analyzer.py
 ```
 
 ### Test Coverage Scenarios
 - Custom usage guide triggering on zero-arguments.
-- API authentication errors (`401 Unauthorized` diagnostics).
-- API connection failures.
+- API authentication errors (`401 Unauthorized` diagnostics) and connection failures.
 - Normal validation with valid certificates (`min_days_left` metrics check).
-- Multiple expirations triggering warning and critical severities simultaneously.
+- Multiple expirations triggering warning/critical severities.
 - Graceful handling of unreachable secondary nodes (triggers `WARNING`).
 - Date parser validation and unsupported date format handling (triggers `UNKNOWN`).
+- Dependency loop protection, missing parents, and standalone trust flags verification.
+
+---
+
+## Certificate Dependency & Orphan Analyzer
+
+In addition to checking expiration, the repository includes `check_ise_orphans.py` which performs a top-down trust chain dependency audit. Over years of certificate renewals, deployments often accumulate old/redundant root CAs, intermediate CAs, and unused self-signed system certificates. This tool helps identify and clean up that clutter.
+
+### Key Capabilities
+- **Top-Down Trust Visualization**: Renders an ASCII hierarchy tree starting from active Root CAs, through intermediate CAs, down to active System Certificates.
+- **Node-Targeted Audits**: Focuses the analysis on a single targeted node (using the `-N`/`--node` flag), isolating its specific trust tree branches and auditing only its system certificates.
+- **Narrow-Screen Readability**: Intelligently auto-truncates long friendly names (while preserving unique suffix `#ID` hashes) and maps usages/trusts to compact abbreviations, with an optional `-w`/`--wide` mode to disable truncation on wide terminals.
+- **Orphan System Certificates**: Detects certificates installed on nodes that are not mapped to any active roles (i.e. `usedBy` is `"Not in use"`).
+- **Unused/Orphan Trusted Certificates**: Identifies certificates in the Trust Store that are enabled but are not part of any active system certificate chain, and have no active trust flags.
+- **Superceded / Duplicate Trusted Certificates**: Flags old versions of CAs that are expired or unused but share a CN with a newer, active CA.
+- **Loop & Recursion Safety**: Employs visited-path checks and leaf boundaries to prevent infinite loops from circular parent-child references.
+
+
+### Command-Line Usage
+```bash
+python3 check_ise_orphans.py -H <host> -u <user> -p <password> [options]
+```
+
+| Flag | Argument | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `-H` | `--host` | **Yes** (or `ISE_HOST` in `.env`) | Cisco ISE Primary PAN hostname or IP address. |
+| `-u` | `--user` | **Yes** (or `ISE_USER` in `.env`) | Cisco ISE ERS or OpenAPI admin username. |
+| `-p` | `--password` | **Yes** (or `ISE_PASSWORD` in `.env`) | Cisco ISE ERS or OpenAPI admin password. |
+| *None*| `--ssl-verify`| No | Enable SSL verification of the Cisco ISE endpoints. |
+| `-x` | `--exclude-cisco-services`| No | Exclude/hide built-in root CAs only used for Cisco Services trust (reduces noise). |
+| `-N` | `--node`     | No | Target a specific node in the deployment for a focused audit and trust chain rendering. |
+| `-w` | `--wide`     | No | Display full certificate names and long fields (disables auto-truncation for narrow screens). |
+| `-v` | `--verbose`   | No | Print detailed discovery logs to stdout. |
+
+

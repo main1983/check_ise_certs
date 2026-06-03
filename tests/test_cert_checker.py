@@ -1,7 +1,7 @@
 import sys
 import os
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 from datetime import datetime, timedelta
 import requests
 
@@ -14,6 +14,19 @@ def raise_system_exit(code=None, *args, **kwargs):
     raise SystemExit(code)
 
 class TestCertChecker(unittest.TestCase):
+
+    def setUp(self):
+        # Mock load_env_file so it does nothing by default in tests, isolating them from any real .env file on disk
+        self.load_env_patcher = patch('check_ise_cert.load_env_file')
+        self.mock_load_env = self.load_env_patcher.start()
+        
+        # Clear os.environ for test isolation so tests don't read existing environment variables
+        self.env_patcher = patch.dict(os.environ, {}, clear=True)
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.load_env_patcher.stop()
+        self.env_patcher.stop()
 
     @patch('sys.stderr')
     @patch('sys.stdout')
@@ -323,33 +336,88 @@ class TestCertChecker(unittest.TestCase):
         ISE_CRITICAL = 20
         ISE_SSL_VERIFY = true
         """
-        env_file_path = ".env"
         
-        # Write temporary .env
-        with open(env_file_path, "w") as f:
-            f.write(env_content)
-            
+        # Temporarily stop the load_env_file patcher to test the real parsing logic
+        self.load_env_patcher.stop()
         try:
-            # We patch sys.argv to simulate running with no arguments.
-            # It should load the values from .env instead of failing on required check.
-            # Also clear os.environ to ensure it reads purely from our .env file.
-            with patch.dict(os.environ, {}, clear=True):
-                with patch('sys.argv', ['check_ise_cert.py']):
-                    check_ise_cert.main()
-                    
-                    mock_check_certs.assert_called_once_with(
-                        host="env-host.local",
-                        user="env-user",
-                        password="env-password",
-                        usage_input="Admin, RADIUS",
-                        warn=40,
-                        crit=20,
-                        ssl_verify=True,
-                        verbose=False
-                    )
+            # Patch os.path.exists and builtins.open to simulate reading the file without writing to disk
+            with patch('os.path.exists', lambda path: path == ".env"):
+                with patch('builtins.open', mock_open(read_data=env_content)):
+                    with patch.dict(os.environ, {}, clear=True):
+                        with patch('sys.argv', ['check_ise_cert.py']):
+                            check_ise_cert.main()
+                            
+                            mock_check_certs.assert_called_once_with(
+                                host="env-host.local",
+                                user="env-user",
+                                password="env-password",
+                                usage_input="Admin, RADIUS",
+                                warn=40,
+                                crit=20,
+                                ssl_verify=True,
+                                verbose=False
+                            )
         finally:
-            if os.path.exists(env_file_path):
-                os.remove(env_file_path)
+            self.load_env_patcher.start()
+
+    @patch('sys.stdout')
+    @patch('sys.exit')
+    @patch('requests.get')
+    def test_non_verbose_http_error_sanitization(self, mock_get, mock_exit, mock_stdout):
+        """Test that a non-401/403 HTTP error from primary PAN does not print the raw exception in non-verbose mode."""
+        mock_exit.side_effect = raise_system_exit
+        
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "Secret internal server error details with token=abc123xyz", response=mock_response
+        )
+        mock_get.return_value = mock_response
+
+        with patch('sys.argv', ['check_ise_cert.py', '-H', 'ise.local', '-u', 'user', '-p', 'pass', '-m', 'Admin']):
+            with self.assertRaises(SystemExit) as cm:
+                check_ise_cert.main()
+            
+            self.assertEqual(cm.exception.code, 2)
+            stdout_calls = "".join(call.args[0] for call in mock_stdout.write.call_args_list)
+            # Should have the clean message without the exception details
+            self.assertIn("CRITICAL: Primary PAN ise.local returned HTTP 500.", stdout_calls)
+            self.assertNotIn("Secret internal server error details", stdout_calls)
+
+    @patch('sys.stdout')
+    @patch('sys.exit')
+    @patch('requests.get')
+    def test_non_verbose_general_exception_sanitization(self, mock_get, mock_exit, mock_stdout):
+        """Test that a general connection exception does not print the raw exception in non-verbose mode."""
+        mock_exit.side_effect = raise_system_exit
+        mock_get.side_effect = Exception("Secret raw traceback details/credentials")
+
+        with patch('sys.argv', ['check_ise_cert.py', '-H', 'ise.local', '-u', 'user', '-p', 'pass', '-m', 'Admin']):
+            with self.assertRaises(SystemExit) as cm:
+                check_ise_cert.main()
+            
+            self.assertEqual(cm.exception.code, 2)
+            stdout_calls = "".join(call.args[0] for call in mock_stdout.write.call_args_list)
+            # Should have the clean message without the exception details
+            self.assertIn("CRITICAL: Primary PAN ise.local connection failed.", stdout_calls)
+            self.assertNotIn("Secret raw traceback details", stdout_calls)
+
+    @patch('sys.stdout')
+    @patch('sys.exit')
+    @patch('check_ise_cert.check_certs')
+    def test_global_exception_handling_non_verbose(self, mock_check_certs, mock_exit, mock_stdout):
+        """Test that unexpected exceptions are caught globally and sanitized in non-verbose mode."""
+        mock_exit.side_effect = raise_system_exit
+        mock_check_certs.side_effect = Exception("Unexpected script crash with token=xyz")
+
+        with patch('sys.argv', ['check_ise_cert.py', '-H', 'ise.local', '-u', 'user', '-p', 'pass', '-m', 'Admin']):
+            with self.assertRaises(SystemExit) as cm:
+                check_ise_cert.main()
+            
+            self.assertEqual(cm.exception.code, 3) # UNKNOWN
+            stdout_calls = "".join(call.args[0] for call in mock_stdout.write.call_args_list)
+            self.assertIn("UNKNOWN: An unexpected error occurred. Use -v/--verbose for diagnostics.", stdout_calls)
+            self.assertNotIn("Unexpected script crash", stdout_calls)
 
 if __name__ == '__main__':
     unittest.main()
