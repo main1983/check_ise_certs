@@ -261,5 +261,27 @@ class TestOrphanAnalyzer(unittest.TestCase):
         self.assertNotIn("node1", output)
         self.assertNotIn("Sub CA 1", output)
 
+    def test_root_ca_loop_prevention(self):
+        future_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S")
+        all_certs = {}
+        
+        # Two root CAs with same subject
+        root1 = CertificateNode('trusted', 'root1', 'Root CA v1', 'RootCA', 'RootCA', future_date, {'status': 'Enabled', 'selfSigned': True})
+        root2 = CertificateNode('trusted', 'root2', 'Root CA v2', 'RootCA', 'RootCA', future_date, {'status': 'Enabled', 'selfSigned': True})
+        
+        for c in [root1, root2]:
+            all_certs[c.key] = c
+            
+        all_certs, issued_to_map, issued_by_map, superceded_certs = analyze_dependencies(all_certs)
+        
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            check_ise_orphans.print_ascii_tree(all_certs, issued_to_map, issued_by_map)
+        output = f.getvalue()
+        
+        self.assertNotIn("Circular Loop Detected", output)
+
 if __name__ == '__main__':
     unittest.main()

@@ -76,8 +76,70 @@ def parse_expiry_date(expiry_str):
                 expiry_date = datetime.strptime(clean_str, "%a %b %d %H:%M:%S %Y")
             except ValueError:
                 pass
-            
+
     return expiry_date
+            
+def extract_suffix_num(friendly_name):
+    """
+    Extracts the unique numeric index suffix (e.g. 45 from "Root CA#00045") if present.
+    """
+    if not friendly_name:
+        return None
+    parts = friendly_name.split('#')
+    if len(parts) > 1:
+        s = parts[-1].strip()
+        if s.isdigit():
+            return int(s)
+    return None
+
+def find_best_parent(child_node, candidates):
+    """
+    Resolves the single best parent among duplicate/renewed CA candidates.
+    Uses standard X.509 validity period nesting constraints, preferring the newest parent CA 
+    that was active at the time the child certificate was issued, and falling back to friendlyName suffix indexes.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    valid_candidates = []
+    child_start_dt = child_node.valid_from
+    child_end_dt = child_node.expiration_date
+
+    for p in candidates:
+        p_start_dt = p.valid_from
+        p_end_dt = p.expiration_date
+
+        start_ok = True
+        if child_start_dt and p_start_dt:
+            # Nesting constraint: Child must be issued after parent start (allow 5-minute grace for clock drift)
+            start_ok = (child_start_dt - p_start_dt).total_seconds() >= -300
+            
+        end_ok = True
+        if child_end_dt and p_end_dt:
+            # Nesting constraint: Parent must not expire before child (allow 5-minute grace for clock drift)
+            end_ok = (p_end_dt - child_end_dt).total_seconds() >= -300
+            
+        if start_ok and end_ok:
+            valid_candidates.append(p)
+
+    if not valid_candidates:
+        valid_candidates = candidates
+
+    if len(valid_candidates) == 1:
+        return valid_candidates[0]
+
+    # Sort valid candidates descending (newest / most specific first):
+    # 1. By valid_from descending (newest parent CA that was active when child was issued)
+    # 2. By friendlyName suffix index descending (if indexes are present)
+    def sort_key(p):
+        ts = p.valid_from.timestamp() if p.valid_from else 0
+        suffix = extract_suffix_num(p.friendly_name) or 0
+        return (ts, suffix)
+
+    valid_candidates.sort(key=sort_key, reverse=True)
+    return valid_candidates[0]
 
 class CertificateNode:
     def __init__(self, cert_type, id_val, friendly_name, issued_to, issued_by, expiration_date_str, raw_data, node_name=None):
@@ -89,6 +151,8 @@ class CertificateNode:
         self.expiration_date_str = expiration_date_str
         self.expiration_date = parse_expiry_date(expiration_date_str)
         self.raw_data = raw_data
+        self.valid_from_str = raw_data.get('validFrom') if isinstance(raw_data, dict) else None
+        self.valid_from = parse_expiry_date(self.valid_from_str)
         self.node_name = node_name  # Only for system certificates
         self.serial_number = raw_data.get('serialNumberDecimalFormat', '')
         
@@ -265,14 +329,15 @@ def analyze_dependencies(all_certs):
             return
             
         candidates = issued_to_map.get(parent_name, [])
-        for parent in candidates:
+        parent = find_best_parent(child_node, candidates)
+        if parent:
             # Avoid cycles
             if parent.key in visited_keys:
-                continue
+                return
             
             # Skip system certificates as parents (system certs don't issue other certs)
             if parent.type == 'system':
-                continue
+                return
                 
             # If child is system certificate, parent CA must be in trust store
             # Mark parent as indirectly active because it is part of an active chain
@@ -402,8 +467,16 @@ def print_ascii_tree(all_certs, issued_to_map, issued_by_map, exclude_cisco_serv
         for c in candidates:
             if c.key == parent_node.key:
                 continue
+            if c.self_signed:
+                # A self-signed certificate is a trust anchor/root, not a child
+                continue
             if c.is_active:
-                children.append(c)
+                # Only add if parent_node is the selected best parent for c
+                parent_name = c.issued_by.lower().strip()
+                parent_candidates = issued_to_map.get(parent_name, [])
+                best_parent = find_best_parent(c, parent_candidates)
+                if best_parent and best_parent.key == parent_node.key:
+                    children.append(c)
         # Sort children: trusted first, then system. Within each, sort by name/friendly name.
         children.sort(key=lambda x: (0 if x.type == 'trusted' else 1, x.node_name or '', x.friendly_name))
         return children
