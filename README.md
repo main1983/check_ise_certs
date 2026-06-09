@@ -238,4 +238,79 @@ python3 check_ise_orphans.py -H <host> -u <user> -p <password> [options]
 | `-w` | `--wide`     | No | Display full certificate names and long fields (disables auto-truncation for narrow screens). |
 | `-v` | `--verbose`   | No | Print detailed discovery logs to stdout. |
 
+### Example Output
+
+When running `check_ise_orphans.py` with the `-x` flag to exclude built-in Cisco Services certificates, the script prints a top-down visualization of active trust chains and audits the remaining certificate portfolio:
+
+```text
+================================================================================
+ ACTIVE CERTIFICATE TRUST CHAINS (TOP-DOWN)
+================================================================================
+├── [CA] 1#Internal Root CA [Infra, Endp, Admin] (4541d left)
+│   └── [CA] 2#Internal Node CA [Infra, Endp, Admin] (886d left)
+├── [CA] 1#LabRootCA [Infra, Endp, Admin] (6902d left)
+│   └── [CA] 2#LabSubCA [Infra, Endp, Admin] (3250d left)
+│       ├── [Node] ise-psn01 | ise-psn01-multiuse [Admin, RAD-DTLS] (91d left)
+│       ├── [Node] ise-psn01 | radius.lab.local [EAP] (91d left)
+│       ├── [Node] ise-psn02 | radius.lab.local [EAP] (91d left)
+│       ├── [Node] ise-pan01 | ise-pan01-multiuse [Admin, RAD-DTLS] (112d left)
+│       └── [Node] ise-pan01 | radius.lab.local [EAP] (91d left)
+├── [CA] Certificate Services Root CA - ise-pan01#00001 [Infra, Endp] (2494d left)
+│   ├── [CA] Certificate Services Node CA - ise-pan01#00002 [Infra, Endp] (2494d left)
+│   │   ├── [CA] Certificate Services Endpoint Sub CA - ise-psn01#00013 [Infra, Endp] (2494d left)
+│   │   │   ├── [CA] Certificate Services OCSP Responder - ise-psn01#00014 [Infra, Endp] (671d left)
+│   │   │   ├── [Node] ise-psn01 | CN=ise-psn01.lab.local, OU=Certificates... #00009 [pxGrid] (1566d left)
+│   │   │   └── [Node] ise-psn01 | CN=ise-psn01.lab.local, OU=ISE Messaging... #00010 [Msg] (1566d left)
+│   │   └── [CA] Certificate Services Endpoint Sub CA - ise-psn02#00022 [Infra, Endp] (2494d left)
+│   │       ├── [CA] Certificate Services OCSP Responder - ise-psn02#00023 [Infra, Endp] (1287d left)
+│   │       ├── [Node] ise-psn02 | CN=ise-psn02.lab.local, OU=Certificates... #00007 [pxGrid] (1566d left)
+│   │       └── [Node] ise-psn02 | CN=ise-psn02.lab.local, OU=ISE Messaging... #00008 [Msg] (1566d left)
+│   └── [CA] Certificate Services Node CA - ise-pan02#00006 [Infra, Endp] (2494d left)
+│       └── [CA] Certificate Services Endpoint Sub CA - ise-psn03#00010 [Infra, Endp] (2494d left)
+│           ├── [Node] ise-psn03 | CN=ise-psn03.lab.local, OU=Certificates... #00010 [pxGrid] (1566d left)
+│           └── [Node] ise-psn03 | CN=ise-psn03.lab.local, OU=ISE Messaging... #00011 [Msg] (1566d left)
+└── [CA] Certificate Services Root CA - ise-pan02#00024 [Infra, Endp] (3392d left)
+    └── [CA] Certificate Services Node CA - ise-pan01#00036 [Infra, Endp] (3392d left)
+        └── [CA] Certificate Services Endpoint Sub CA - ise-psn01#00013 [Infra, Endp] (2494d left)
+            ...
+
+================================================================================
+ CERTIFICATE PORTFOLIO SUMMARY
+================================================================================
+ Total System Certificates:      15
+   - Active (In Use):           11
+   - Orphaned (Not in Use):      4
+ Total Trusted Certificates:     62
+   - Active/In Chain:           58
+   - Unused/Orphaned:           3
+   - Expired:                   0
+   - Disabled (Unexpired):      1
+   - Superceded/Duplicate CAs:  0
+================================================================================
+
+[!] ORPHAN SYSTEM CERTIFICATES (NOT BOUND TO SERVICES)
+These are system certificates installed on specific nodes but not mapped to any active roles.
+  1. [ise-psn02] CN=ise-psn02.lab.local, OU=Certificate Services System Certificate#00002
+     ID: 6f8b972d-646f-418f-8d7c-86bfb2f8a74e | Expires in 1823d | Serial: 132618640801355591741301059307792052264
+  2. [ise-psn02] Default self-signed saml server certificate - CN=SAML_ise-pan01.lab.local
+     ID: e71e965b-6a95-4be5-8080-fa981041cd1f | Expires in 666d | Serial: 168050877714080335399766472090
+
+[!] EXPIRED TRUSTED CERTIFICATES (IN TRUST STORE)
+These certificates are expired and should be removed from the Trust Store to maintain security.
+  None. No expired trusted certificates found.
+
+[!] SUPERCEDED / DUPLICATE TRUST STORE CERTIFICATES
+These are older or redundant versions of CAs that are already replaced by a newer active version.
+  None. No duplicate CA certificates found.
+
+[!] UNUSED / ORPHAN TRUSTED CERTIFICATES
+These certificates are enabled but not part of any active system certificate chain, and have no active usages.
+  1. VeriSign Class 3 Public Primary Certification Authority (1075d left)
+     ID: 9be05316-0f64-4ba4-9956-2130526794e8 | Serial: 127566847139401841621357201087378599423
+
+[-] DISABLED TRUSTED CERTIFICATES
+These certificates are explicitly disabled in the Trust Store.
+  None.
+```
+
 

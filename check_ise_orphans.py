@@ -9,6 +9,26 @@ It identifies:
 3. Orphaned Trusted Certificates (certificates in the trust store that are not part of any active chain and have no active trust flags).
 4. Expired Trusted Certificates.
 5. Superceded/Duplicate Trusted Certificates (old versions of CAs that are expired or unused).
+
+Usage Guide:
+  check_ise_orphans.py resolves the complex trust tree by mapping leaf system certificates
+  up to their Root CAs. It handles certificate renewals (where multiple parent CAs share
+  the same Subject CN name) by analyzing X.509 date nesting constraints and generation
+  order.
+
+Usage:
+  python3 check_ise_orphans.py -H <host> -u <user> -p <password> [options]
+
+Options:
+  -H, --host        Cisco ISE Primary PAN hostname or IP address.
+  -u, --user        Cisco ISE API Admin username.
+  -p, --password    Cisco ISE API Admin password.
+  --ssl-verify      Enable SSL certificate verification (Disabled by default).
+  -x, --exclude-cisco-services
+                    Exclude built-in root CAs used only for Cisco Services trust (reduces noise).
+  -N, --node        Target a specific node for focused audit/rendering.
+  -w, --wide        Display full certificate names and long fields (disables auto-truncation).
+  -v, --verbose     Print detailed discovery logs to stdout.
 """
 
 import sys
@@ -25,6 +45,11 @@ def load_env_file(env_path=".env"):
     """
     Parses a .env file and sets values in os.environ.
     This avoids adding external dependencies like python-dotenv.
+
+    How it works:
+        Reads the env_path line by line, ignores comment lines starting with #,
+        splits keys/values on the first '=' symbol, strips quotes, and writes
+        them to os.environ.
     """
     if not os.path.exists(env_path):
         return
@@ -44,6 +69,14 @@ def load_env_file(env_path=".env"):
 def get_ise_data(url, user, password, ssl_verify=False):
     """
     Performs an authenticated GET request to the Cisco ISE API.
+
+    How it works:
+        Uses Basic Authentication to make requests to the ISE ERS/OpenAPI endpoints.
+        Enforces a 12-second timeout to handle slow clusters gracefully.
+    
+    Snag:
+        By default, Cisco ISE HTTPS endpoints use self-signed certs. When ssl_verify
+        is False, we suppress urllib3 warnings to keep output readable.
     """
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     response = requests.get(url, auth=(user, password), headers=headers, verify=ssl_verify, timeout=12)
@@ -53,6 +86,15 @@ def get_ise_data(url, user, password, ssl_verify=False):
 def parse_expiry_date(expiry_str):
     """
     Parses the certificate expiration/validity datetime string using multiple fallback formats.
+
+    How it works:
+        Cisco ISE dates can be returned in ISO 8601 (with milliseconds/timezone offsets) or
+        CET/CEST space-separated formats. We loop over multiple date formats using strptime.
+    
+    Snag:
+        If a space-separated date string has a timezone abbreviation like 'CEST' or 'CET',
+        standard strptime cannot parse the timezone abbreviation. We handle this by splitting
+        the string and stripping the 5th element (the timezone code) out of the string.
     """
     if not expiry_str:
         return None
@@ -82,6 +124,10 @@ def parse_expiry_date(expiry_str):
 def extract_suffix_num(friendly_name):
     """
     Extracts the unique numeric index suffix (e.g. 45 from "Root CA#00045") if present.
+
+    How it works:
+        Cisco ISE appends a '#' followed by a sequential number to friendly names during CA
+        regeneration. We split by '#' and extract the tail digit sequence if it exists.
     """
     if not friendly_name:
         return None
@@ -97,6 +143,24 @@ def find_best_parent(child_node, candidates):
     Resolves the single best parent among duplicate/renewed CA candidates.
     Uses standard X.509 validity period nesting constraints, preferring the newest parent CA 
     that was active at the time the child certificate was issued, and falling back to friendlyName suffix indexes.
+
+    How it works:
+        1. Compares start dates: Parent CA must start before the child CA (`valid_from`).
+        2. Compares end dates: Parent CA must expire after the child CA (`expiration_date`).
+        3. Grace periods: Adds a 5-minute (300-second) window for clock drift.
+        4. Chronological sort: If multiple CAs pass nesting checks (like v1 and v2 of a root CA),
+           they are sorted by `valid_from` descending (newest first).
+        5. Suffix fallback: Ties are resolved by sorting friendly name serial suffixes descending.
+
+    Why it works:
+        During regeneration, child certificates are signed by the newest active CA. The correct parent
+        will always be the candidate with the latest `valid_from` timestamp that starts before the child.
+
+    Snags:
+        - API Limits: The ERS/OpenAPI endpoints do not return AKI/SKI, preventing cryptographic chain verification.
+        - Suffix pools: System certificates and CA certificates do not share the same incrementing pools,
+          meaning a system certificate's own suffix could be lower than the parent CA's suffix (e.g., child #00011
+          issued by parent CA #00061). To resolve this, sorting by date is prioritized over suffix value comparisons.
     """
     if not candidates:
         return None
@@ -142,6 +206,10 @@ def find_best_parent(child_node, candidates):
     return valid_candidates[0]
 
 class CertificateNode:
+    """
+    Represents a single System or Trusted certificate and tracks its metadata,
+    validity dates, usage roles, trust flags, and trust graph state.
+    """
     def __init__(self, cert_type, id_val, friendly_name, issued_to, issued_by, expiration_date_str, raw_data, node_name=None):
         self.type = cert_type  # 'system' or 'trusted'
         self.id = id_val
@@ -215,6 +283,18 @@ class CertificateNode:
 def build_trust_graph(host, user, password, ssl_verify=False, verbose=False):
     """
     Queries Cisco ISE API to fetch all system and trusted certificates, and returns lists of nodes.
+
+    How it works:
+        1. Discovers all deployment nodes via `/api/v1/deployment/node`.
+        2. For each node, queries its system certificates via `/api/v1/certs/system-certificate/{nodeName}`.
+        3. Queries all trusted certificates via `/api/v1/certs/trusted-certificate`.
+        4. Instantiates `CertificateNode` objects and returns a dict mapping unique keys to certificates.
+
+    Snags:
+        - Pagination: `/api/v1/certs/trusted-certificate` is paginated. The script loops over pages
+          of size 100 until an empty response is received. System certificate calls do not require
+          pagination.
+        - Fail-Safe: If a secondary node is offline, we log a warning but proceed with the other nodes.
     """
     def log_verbose(msg):
         if verbose:
@@ -292,6 +372,21 @@ def build_trust_graph(host, user, password, ssl_verify=False, verbose=False):
 def analyze_dependencies(all_certs):
     """
     Builds the dependency relationships and identifies active chains, orphans, and redundant certificates.
+
+    How it works:
+        1. Subject/Issuer Maps: Builds index lookup maps (issued_to_map and issued_by_map) to allow quick,
+           case-insensitive parent/child node resolving.
+        2. Direct Activity Flagging:
+           - System certificates are active if their `usedBy` field has bound services.
+           - Trusted certificates are active if they are enabled and have active client/infra trust flags.
+        3. Upward Chain Tracing: Recursively calls `trace_parents` from active system certificates up
+           to Root CAs, marking CAs in the path as `is_indirectly_active`.
+        4. Redundancy Audits: Identifies old/superseded version groups in `issued_to_map`. If an unexpired,
+           active version exists, other CAs with the same CN name are flagged as superseded.
+
+    Why it works:
+        This isolates active paths from dead paths, exposing CA certificates in the trust store
+        that are not required to back any system service or trust client connections.
     """
     # Build lookup maps:
     # - issued_to_map: issuedTo (lowercase, stripped) -> list of CertificateNode
@@ -426,6 +521,20 @@ def truncate_friendly(friendly_name, max_len=35):
 def print_ascii_tree(all_certs, issued_to_map, issued_by_map, exclude_cisco_services=False, wide=False, node_filter=None):
     """
     Constructs and prints the top-down active trust chains starting from Root CAs down to System Certificates.
+
+    How it works:
+        1. Roots Search: Identifies active root CAs (self-signed, or CAs with no active parents in the store).
+        2. `get_children` Downward Mapping:
+           - Employs `get_children` to locate certificates that list the current node as their parent.
+           - Crucially, it validates the candidate against `find_best_parent(c, parent_candidates)` to prevent
+             duplicate rendering under multiple parent versions.
+        3. Recursive ASCII tree rendering: Walk from Roots to leaves using prefix formatting.
+
+    Snags:
+        - Circular Loop Detection: In misconfigured trust stores, CAs can have self-signed loops or mutual sign
+          relationships. We track visited keys in the current tree path and print a loop warning if recursion repeats.
+        - Exclusions: Built-in Cisco Services CAs (which clutter the tree) can be omitted from output using
+          `exclude_cisco_services`.
     """
     # 1. Find all active root/trust anchors
     active_certs = [c for c in all_certs.values() if c.is_active]
@@ -560,6 +669,14 @@ def print_ascii_tree(all_certs, issued_to_map, issued_by_map, exclude_cisco_serv
 def print_audit_report(all_certs, superceded_certs, exclude_cisco_services=False, wide=False, node_filter=None):
     """
     Prints a detailed audit report listing orphans, expired certificates, and superceded CAs.
+
+    How it works:
+        Groups, sorts, and prints lists of certificates that have been classified into:
+        - Orphan System Certificates (not bound to any node services).
+        - Expired Trusted Certificates (expired CAs still present in the store).
+        - Superseded Trusted CAs (redundant/older versions of current CAs).
+        - Unused/Orphan Trusted Certificates (valid CAs that have no children and no active trust flags).
+        - Disabled Trusted Certificates.
     """
     sys_certs = [c for c in all_certs.values() if c.type == 'system']
     trusted_certs = [c for c in all_certs.values() if c.type == 'trusted']
